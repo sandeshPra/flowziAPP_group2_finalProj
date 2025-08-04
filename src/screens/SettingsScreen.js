@@ -25,7 +25,6 @@ import {
   deleteDoc,
   writeBatch,
 } from "firebase/firestore";
-import * as Updates from "expo-updates";
 import { SIZES, FONTS } from "../constants/theme";
 
 const SettingsScreen = () => {
@@ -46,82 +45,134 @@ const SettingsScreen = () => {
   const [incomeAmount, setIncomeAmount] = useState("");
   const [incomeFrequency, setIncomeFrequency] = useState("monthly");
   const [clearing, setClearing] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
-    if (!user) return;
-    const userId = user.uid;
-    const unsubscribe = onSnapshot(
-      doc(db, "users", userId),
-      (userDoc) => {
-        if (userDoc.exists()) {
-          const data = userDoc.data();
-          if (data.incomeAmount) {
-            const displayAmount = convertAmount(data.incomeAmount);
-            setIncomeAmount(displayAmount.toString());
-          }
-          if (data.incomeFrequency) setIncomeFrequency(data.incomeFrequency);
-        }
-      },
-      (error) => {
-        console.error("Settings: Error fetching user settings:", error);
-      }
-    );
+    if (!user?.uid) return;
 
-    return () => unsubscribe();
+    let unsubscribe = null;
+
+    const setupUserListener = async () => {
+      try {
+        const userId = user.uid;
+        unsubscribe = onSnapshot(
+          doc(db, "users", userId),
+          (userDoc) => {
+            try {
+              if (userDoc.exists()) {
+                const data = userDoc.data();
+                if (data.incomeAmount && convertAmount) {
+                  const displayAmount = convertAmount(data.incomeAmount);
+                  setIncomeAmount(displayAmount.toString());
+                }
+                if (data.incomeFrequency) {
+                  setIncomeFrequency(data.incomeFrequency);
+                }
+              }
+            } catch (error) {
+              console.error("Settings: Error processing user document:", error);
+            }
+          },
+          (error) => {
+            console.error("Settings: Error fetching user settings:", error);
+          }
+        );
+      } catch (error) {
+        console.error("Settings: Error setting up user listener:", error);
+      }
+    };
+
+    setupUserListener().catch((error) => {
+      console.error("Settings: Error in setupUserListener:", error);
+    });
+
+    return () => {
+      if (unsubscribe) {
+        try {
+          unsubscribe();
+        } catch (error) {
+          console.error("Settings: Error unsubscribing:", error);
+        }
+      }
+    };
   }, [convertAmount, user]);
 
   const handleSaveSettings = async () => {
-    await updateCurrencyPreferences(
-      selectedCurrency,
-      isShowCents,
-      isSymbolBefore ? "before" : "after"
-    );
-
-    if (incomeAmount) {
-      if (!user) return;
-      const userId = user.uid;
-      let monthlyIncome = parseFloat(incomeAmount);
-
-      const exchangeRates = {
-        USD: 1,
-        EUR: 0.92,
-        GBP: 0.76,
-        CAD: 1.34,
-        INR: 83.5,
-        AUD: 1.47,
-        JPY: 149.2,
-        CNY: 7.09,
-      };
-      const rate = exchangeRates[currency] || 1;
-      monthlyIncome = monthlyIncome / rate;
-
-      if (incomeFrequency === "weekly") {
-        monthlyIncome = monthlyIncome * 4;
-      } else if (incomeFrequency === "yearly") {
-        monthlyIncome = monthlyIncome / 12;
-      }
-
-      console.log(
-        "Settings: Writing to Firestore - monthlyIncome (USD):",
-        monthlyIncome
-      );
-      try {
-        await setDoc(
-          doc(db, "users", userId),
-          {
-            incomeAmount: parseFloat(incomeAmount),
-            incomeFrequency,
-            monthlyIncome,
-          },
-          { merge: true }
+    try {
+      // Update currency preferences with error handling
+      if (updateCurrencyPreferences) {
+        await updateCurrencyPreferences(
+          selectedCurrency,
+          isShowCents,
+          isSymbolBefore ? "before" : "after"
         );
-        console.log("Settings: Successfully wrote monthlyIncome to Firestore");
-      } catch (error) {
-        console.error("Settings: Error writing to Firestore:", error);
       }
-    }
 
-    alert("Settings Saved!");
+      if (incomeAmount && user?.uid) {
+        const userId = user.uid;
+        let monthlyIncome = parseFloat(incomeAmount);
+
+        if (isNaN(monthlyIncome)) {
+          Alert.alert("Error", "Please enter a valid income amount");
+          return;
+        }
+
+        const exchangeRates = {
+          USD: 1,
+          EUR: 0.92,
+          GBP: 0.76,
+          CAD: 1.34,
+          INR: 83.5,
+          AUD: 1.47,
+          JPY: 149.2,
+          CNY: 7.09,
+        };
+
+        const rate = exchangeRates[currency] || 1;
+        monthlyIncome = monthlyIncome / rate;
+
+        if (incomeFrequency === "weekly") {
+          monthlyIncome = monthlyIncome * 4;
+        } else if (incomeFrequency === "yearly") {
+          monthlyIncome = monthlyIncome / 12;
+        }
+
+        console.log(
+          "Settings: Writing to Firestore - monthlyIncome (USD):",
+          monthlyIncome
+        );
+
+        try {
+          await setDoc(
+            doc(db, "users", userId),
+            {
+              incomeAmount: parseFloat(incomeAmount),
+              incomeFrequency,
+              monthlyIncome,
+            },
+            { merge: true }
+          );
+          console.log(
+            "Settings: Successfully wrote monthlyIncome to Firestore"
+          );
+        } catch (firestoreError) {
+          console.error(
+            "Settings: Error writing to Firestore:",
+            firestoreError
+          );
+          Alert.alert(
+            "Error",
+            "Failed to save income settings. Please try again."
+          );
+          return;
+        }
+      }
+
+      Alert.alert("Success", "Settings saved successfully!");
+    } catch (error) {
+      console.error("Settings: Error in handleSaveSettings:", error);
+      Alert.alert("Error", "Failed to save settings. Please try again.");
+    }
   };
 
   const clearAllData = () => {
@@ -135,62 +186,91 @@ const SettingsScreen = () => {
           onPress: async () => {
             setClearing(true);
             try {
-              if (!user) return;
+              if (!user?.uid) {
+                Alert.alert("Error", "User not authenticated");
+                return;
+              }
+
               const userId = user.uid;
-              const batch = writeBatch(db); // Use batch for atomic deletes
+              const batch = writeBatch(db);
 
-              // Batch delete transactions
-              const transactionsQuery = query(collection(db, "transactions"));
-              const transactionsSnapshot = await getDocs(transactionsQuery);
-              transactionsSnapshot.docs.forEach((docSnap) => {
-                batch.delete(docSnap.ref);
-              });
+              try {
+                // Batch delete transactions with error handling
+                const transactionsQuery = query(collection(db, "transactions"));
+                const transactionsSnapshot = await getDocs(transactionsQuery);
+                transactionsSnapshot.docs.forEach((docSnap) => {
+                  batch.delete(docSnap.ref);
+                });
 
-              // Batch delete goals
-              const goalsQuery = query(collection(db, "goals"));
-              const goalsSnapshot = await getDocs(goalsQuery);
-              goalsSnapshot.docs.forEach((docSnap) => {
-                batch.delete(docSnap.ref);
-              });
+                // Batch delete goals with error handling
+                const goalsQuery = query(collection(db, "goals"));
+                const goalsSnapshot = await getDocs(goalsQuery);
+                goalsSnapshot.docs.forEach((docSnap) => {
+                  batch.delete(docSnap.ref);
+                });
 
-              // Batch delete bills
-              const billsQuery = query(collection(db, "bills"));
-              const billsSnapshot = await getDocs(billsQuery);
-              billsSnapshot.docs.forEach((docSnap) => {
-                batch.delete(docSnap.ref);
-              });
+                // Batch delete bills with error handling
+                const billsQuery = query(collection(db, "bills"));
+                const billsSnapshot = await getDocs(billsQuery);
+                billsSnapshot.docs.forEach((docSnap) => {
+                  batch.delete(docSnap.ref);
+                });
 
-              // Commit batch deletes
-              await batch.commit();
-              console.log("Cleared all transactions, goals, and bills");
+                // Commit batch deletes
+                await batch.commit();
+                console.log("Cleared all transactions, goals, and bills");
+              } catch (batchError) {
+                console.error("Error during batch operations:", batchError);
+                throw new Error("Failed to clear data from database");
+              }
 
-              // Reset user settings
-              await setDoc(
-                doc(db, "users", userId),
-                {
-                  monthlyIncome: 0,
-                  incomeAmount: 0,
-                  incomeFrequency: "monthly",
-                  currency: "USD",
-                  showCents: true,
-                  symbolPosition: "before",
-                },
-                { merge: true }
+              try {
+                // Reset user settings
+                await setDoc(
+                  doc(db, "users", userId),
+                  {
+                    monthlyIncome: 0,
+                    incomeAmount: 0,
+                    incomeFrequency: "monthly",
+                    currency: "USD",
+                    showCents: true,
+                    symbolPosition: "before",
+                  },
+                  { merge: true }
+                );
+                console.log("Reset user settings");
+              } catch (resetError) {
+                console.error("Error resetting user settings:", resetError);
+                throw new Error("Failed to reset user settings");
+              }
+
+              try {
+                // Reset local state to reflect changes immediately
+                setIncomeAmount("");
+                setIncomeFrequency("monthly");
+                setSelectedCurrency("USD");
+                setIsShowCents(true);
+                setIsSymbolBefore(true);
+
+                // Update currency preferences to reflect the reset
+                if (updateCurrencyPreferences) {
+                  await updateCurrencyPreferences("USD", true, "before");
+                }
+              } catch (stateError) {
+                console.error("Error updating local state:", stateError);
+                // Don't throw here as data is already cleared from database
+              }
+
+              Alert.alert(
+                "Success",
+                "All data cleared! Your app has been reset to default settings."
               );
-              console.log("Reset user settings");
-
-              // Reset local state
-              setIncomeAmount("");
-              setIncomeFrequency("monthly");
-
-              alert(
-                "All data cleared! Tabs like Home, Wallet, Goals, and Analytics are now reset."
-              );
-              // Force app reload to reflect changes immediately
-              await Updates.reloadAsync();
             } catch (error) {
               console.error("Error clearing data:", error);
-              alert("Failed to clear data. Please try again.");
+              Alert.alert(
+                "Error",
+                `Failed to clear data: ${error.message || "Unknown error"}`
+              );
             } finally {
               setClearing(false);
             }
@@ -206,12 +286,41 @@ const SettingsScreen = () => {
       {
         text: "Yes",
         onPress: async () => {
+          setLoggingOut(true);
           try {
-            await logout();
-            // If logout is successful, the AuthContext will handle navigation
+            if (!logout) {
+              throw new Error("Logout function not available");
+            }
+
+            // Call logout and check the result
+            const result = await logout();
+
+            if (result.success) {
+              // Logout successful - AuthContext will handle navigation
+              console.log("Logout successful");
+            } else {
+              // Logout failed - show error
+              const errorMessage =
+                result.error?.message ||
+                result.error?.code ||
+                "Unknown error occurred";
+              console.error("Logout failed:", result.error);
+              Alert.alert(
+                "Logout Failed",
+                `Could not log out: ${errorMessage}`
+              );
+            }
           } catch (error) {
-            console.error("Logout error:", error);
-            alert("Logout failed: " + error.message);
+            // Handle any unexpected errors
+            console.error("Unexpected logout error:", error);
+            Alert.alert(
+              "Error",
+              `Logout failed: ${
+                error.message || "An unexpected error occurred"
+              }`
+            );
+          } finally {
+            setLoggingOut(false);
           }
         },
       },
@@ -260,7 +369,15 @@ const SettingsScreen = () => {
           <Text style={[FONTS.medium, { color: colors.text }]}>Theme</Text>
           <Picker
             selectedValue={theme}
-            onValueChange={(value) => updateTheme(value)}
+            onValueChange={(value) => {
+              try {
+                if (updateTheme) {
+                  updateTheme(value);
+                }
+              } catch (error) {
+                console.error("Error updating theme:", error);
+              }
+            }}
             style={[styles.picker, { color: colors.text }]}
           >
             <Picker.Item label="Light" value="light" />
@@ -367,11 +484,25 @@ const SettingsScreen = () => {
 
         {/* Logout Button */}
         <CustomButton
-          title="Logout"
+          title={loggingOut ? "Logging out..." : "Logout"}
           onPress={handleLogout}
-          style={[styles.button, { backgroundColor: colors.error }]}
+          style={[
+            styles.button,
+            {
+              backgroundColor: colors.error,
+              opacity: loggingOut ? 0.7 : 1,
+            },
+          ]}
           textColor={colors.white}
+          disabled={loggingOut}
         />
+        {loggingOut && (
+          <ActivityIndicator
+            size="small"
+            color={colors.primary}
+            style={styles.loader}
+          />
+        )}
 
         {/* FLOWZI Footer */}
         <View

@@ -57,22 +57,153 @@ const RegisterScreen = ({ navigation }) => {
     }
 
     setLoading(true);
-    const result = await register(
-      email.trim(),
-      password,
-      firstName.trim(),
-      lastName.trim()
-    );
-    setLoading(false);
+    try {
+      const result = await register(
+        email.trim(),
+        password,
+        firstName.trim(),
+        lastName.trim()
+      );
+      setLoading(false);
 
-    if (!result.success) {
-      Alert.alert("Registration Failed", result.error);
-    } else {
+      if (!result.success) {
+        // Handle specific error cases
+        const errorMessage = getRegistrationErrorMessage(result.error);
+        Alert.alert("Registration Failed", errorMessage);
+      } else {
+        Alert.alert(
+          "Success",
+          "Account created successfully! Welcome to FLOWZI!"
+        );
+      }
+    } catch (error) {
+      setLoading(false);
+      console.error("Registration error:", error);
       Alert.alert(
-        "Success",
-        "Account created successfully! Welcome to FLOWZI!"
+        "Registration Failed",
+        "Something went wrong. Please try again."
       );
     }
+  };
+
+  const getRegistrationErrorMessage = (error) => {
+    // Handle different error formats
+    let errorString = "";
+    let errorCode = "";
+
+    if (typeof error === "string") {
+      errorString = error;
+    } else if (error?.code) {
+      // Firebase error with code property
+      errorCode = error.code;
+      errorString = error.message || error.toString();
+    } else if (error?.message) {
+      errorString = error.message;
+    } else {
+      errorString = error?.toString() || "";
+    }
+
+    const lowerError = errorString.toLowerCase();
+    const lowerCode = errorCode.toLowerCase();
+
+    // Check Firebase error codes first (most reliable)
+    if (
+      errorCode === "auth/email-already-in-use" ||
+      lowerCode.includes("email-already-in-use")
+    ) {
+      return "This email is already in use. Please try with a different email or sign in instead.";
+    }
+
+    if (
+      errorCode === "auth/weak-password" ||
+      lowerCode.includes("weak-password")
+    ) {
+      return "Password is too weak. Please use at least 6 characters with a mix of letters and numbers.";
+    }
+
+    if (
+      errorCode === "auth/invalid-email" ||
+      lowerCode.includes("invalid-email")
+    ) {
+      return "Please enter a valid email address.";
+    }
+
+    if (
+      errorCode === "auth/operation-not-allowed" ||
+      lowerCode.includes("operation-not-allowed")
+    ) {
+      return "Account creation is currently disabled. Please try again later.";
+    }
+
+    if (
+      errorCode === "auth/too-many-requests" ||
+      lowerCode.includes("too-many-requests")
+    ) {
+      return "Too many attempts. Please wait a moment and try again.";
+    }
+
+    if (
+      errorCode === "auth/network-request-failed" ||
+      lowerCode.includes("network")
+    ) {
+      return "Network error. Please check your internet connection and try again.";
+    }
+
+    // Check for specific Firebase error messages in the error string
+    if (
+      lowerError.includes("auth/email-already-in-use") ||
+      lowerError.includes("email-already-in-use") ||
+      lowerError.includes("email already in use") ||
+      lowerError.includes("email address is already in use")
+    ) {
+      return "This email is already in use. Please try with a different email or sign in instead.";
+    }
+
+    if (
+      lowerError.includes("auth/weak-password") ||
+      lowerError.includes("weak-password") ||
+      lowerError.includes("password should be at least")
+    ) {
+      return "Password is too weak. Please use at least 6 characters with a mix of letters and numbers.";
+    }
+
+    if (
+      lowerError.includes("auth/invalid-email") ||
+      lowerError.includes("invalid-email") ||
+      lowerError.includes("invalid email")
+    ) {
+      return "Please enter a valid email address.";
+    }
+
+    if (
+      lowerError.includes("auth/operation-not-allowed") ||
+      lowerError.includes("operation-not-allowed") ||
+      lowerError.includes("operation not allowed")
+    ) {
+      return "Account creation is currently disabled. Please try again later.";
+    }
+
+    if (lowerError.includes("network") || lowerError.includes("connection")) {
+      return "Network error. Please check your internet connection and try again.";
+    }
+
+    if (
+      lowerError.includes("too-many-requests") ||
+      lowerError.includes("too many requests")
+    ) {
+      return "Too many attempts. Please wait a moment and try again.";
+    }
+
+    // If it's already a user-friendly message, return it
+    if (
+      lowerError.includes("email is already in use") ||
+      lowerError.includes("already in use")
+    ) {
+      return errorString;
+    }
+
+    // Default fallback for unrecognized errors
+    return "Failed to create account. Please check your information and try again.";
   };
 
   const isValidEmail = (email) => {

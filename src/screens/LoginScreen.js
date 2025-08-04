@@ -37,12 +37,126 @@ const LoginScreen = ({ navigation }) => {
       Alert.alert("Error", "Please enter a valid email address.");
       return;
     }
+
     setLoading(true);
-    const result = await login(email.trim(), password);
-    setLoading(false);
-    if (!result.success) {
-      Alert.alert("Login Failed", result.error);
+    try {
+      const result = await login(email.trim(), password);
+      setLoading(false);
+
+      if (!result.success) {
+        // Handle specific error cases
+        const errorMessage = getLoginErrorMessage(result.error);
+        Alert.alert("Login Failed", errorMessage);
+      }
+    } catch (error) {
+      setLoading(false);
+      console.error("Login error:", error);
+      Alert.alert("Login Failed", "Something went wrong. Please try again.");
     }
+  };
+
+  const getLoginErrorMessage = (error) => {
+    // Handle different error formats
+    let errorString = "";
+    let errorCode = "";
+
+    if (typeof error === "string") {
+      errorString = error;
+    } else if (error?.code) {
+      // Firebase error with code property
+      errorCode = error.code;
+      errorString = error.message || error.toString();
+    } else if (error?.message) {
+      errorString = error.message;
+    } else {
+      errorString = error?.toString() || "";
+    }
+
+    const lowerError = errorString.toLowerCase();
+    const lowerCode = errorCode.toLowerCase();
+
+    // Check Firebase error codes first (most reliable)
+    if (
+      errorCode === "auth/invalid-credential" ||
+      errorCode === "auth/wrong-password" ||
+      errorCode === "auth/user-not-found" ||
+      lowerCode.includes("invalid-credential") ||
+      lowerCode.includes("wrong-password") ||
+      lowerCode.includes("user-not-found")
+    ) {
+      return "Wrong email or password. Please try again.";
+    }
+
+    if (
+      errorCode === "auth/invalid-email" ||
+      lowerCode.includes("invalid-email")
+    ) {
+      return "Please enter a valid email address.";
+    }
+
+    if (
+      errorCode === "auth/too-many-requests" ||
+      lowerCode.includes("too-many-requests")
+    ) {
+      return "Too many failed attempts. Please try again later.";
+    }
+
+    if (
+      errorCode === "auth/network-request-failed" ||
+      lowerCode.includes("network")
+    ) {
+      return "Network error. Please check your internet connection.";
+    }
+
+    // Check for specific Firebase error messages in the error string
+    if (
+      lowerError.includes("auth/invalid-credential") ||
+      lowerError.includes("invalid-credential") ||
+      lowerError.includes("invalid credential")
+    ) {
+      return "Wrong email or password. Please try again.";
+    }
+
+    if (
+      lowerError.includes("user-not-found") ||
+      lowerError.includes("user not found") ||
+      lowerError.includes("no user record")
+    ) {
+      return "Wrong email or password. Please try again.";
+    }
+
+    if (
+      lowerError.includes("wrong-password") ||
+      lowerError.includes("password is invalid")
+    ) {
+      return "Wrong email or password. Please try again.";
+    }
+
+    if (
+      lowerError.includes("invalid-email") ||
+      lowerError.includes("invalid email")
+    ) {
+      return "Please enter a valid email address.";
+    }
+
+    if (
+      lowerError.includes("too-many-requests") ||
+      lowerError.includes("too many requests")
+    ) {
+      return "Too many failed attempts. Please try again later.";
+    }
+
+    if (lowerError.includes("network") || lowerError.includes("connection")) {
+      return "Network error. Please check your internet connection.";
+    }
+
+    // If it's already a user-friendly message, return it
+    if (lowerError.includes("wrong email or password")) {
+      return errorString;
+    }
+
+    // Default fallback for unrecognized errors
+    return "Wrong email or password. Please try again.";
   };
 
   const isValidEmail = (email) => {

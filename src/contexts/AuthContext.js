@@ -18,37 +18,73 @@ export const AuthProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    let previousUser = null; // Track if we had a user before
+    let notificationInitialized = false; // Track notification initialization
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        try {
-          const userDoc = await getDoc(doc(db, "users", user.uid));
-          const userData = userDoc.exists() ? userDoc.data() : {};
+      try {
+        if (user) {
+          try {
+            const userDoc = await getDoc(doc(db, "users", user.uid));
+            const userData = userDoc.exists() ? userDoc.data() : {};
 
-          setUser({
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName,
-            ...userData,
-          });
+            setUser({
+              uid: user.uid,
+              email: user.email,
+              displayName: user.displayName,
+              ...userData,
+            });
 
-          await NotificationService.initialize();
+            // Initialize notifications for authenticated user (non-blocking)
+            // Only initialize once per session
+            if (!notificationInitialized) {
+              notificationInitialized = true;
+              NotificationService.initialize()
+                .then(() => {
+                  // Only schedule weekly summary if initialization was successful
+                  return NotificationService.scheduleWeeklySummary();
+                })
+                .catch((error) => {
+                  console.warn("Notification setup failed:", error.message);
+                  notificationInitialized = false; // Reset so we can try again
+                });
+            }
 
-          await NotificationService.scheduleWeeklySummary();
-        } catch (error) {
-          console.error("Error fetching user data:", error);
-          setUser({
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName,
-          });
+            previousUser = user;
+          } catch (error) {
+            console.warn("Could not fetch user data:", error.message);
+            setUser({
+              uid: user.uid,
+              email: user.email,
+              displayName: user.displayName,
+            });
+            previousUser = user;
+          }
+        } else {
+          // Only cleanup notifications if we previously had a user (actual logout)
+          if (previousUser) {
+            // Non-blocking cleanup
+            Promise.resolve()
+              .then(() => NotificationService.cleanup())
+              .then(() => NotificationService.cancelAllNotifications())
+              .catch((error) =>
+                console.warn("Notification cleanup failed:", error.message)
+              );
+
+            notificationInitialized = false; // Reset for next login
+          }
+
+          setUser(null);
+          previousUser = null;
         }
-      } else {
+      } catch (error) {
+        console.warn("Auth state change error:", error.message);
         setUser(null);
-
-        NotificationService.cleanup();
-        await NotificationService.cancelAllNotifications();
+        previousUser = null;
+        notificationInitialized = false;
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     });
 
     return unsubscribe;
@@ -63,18 +99,27 @@ export const AuthProvider = ({ children }) => {
         password
       );
 
+      // Schedule welcome back notification only on successful login
+      // Use a longer timeout to ensure NotificationService is initialized
       setTimeout(() => {
         NotificationService.scheduleNotification(
           "👋 Welcome back to FLOWZI!",
           "Ready to continue your financial journey? Check your latest progress!",
           { type: "welcome_back" }
-        );
-      }, 2000);
+        ).catch((error) => {
+          console.warn(
+            "Could not schedule welcome notification:",
+            error.message
+          );
+        });
+      }, 3000); // Increased timeout
 
       return { success: true, user: userCredential.user };
     } catch (error) {
-      console.error("Login error:", error);
-      return { success: false, error: error.message };
+      // Only log the error code for debugging, not the full error
+      console.warn("Login failed:", error.code || "Unknown error");
+      // Return the full error object to preserve error.code and error.message
+      return { success: false, error: error };
     } finally {
       setIsLoading(false);
     }
@@ -103,13 +148,20 @@ export const AuthProvider = ({ children }) => {
           "🎉 Welcome to FLOWZI!",
           "Thanks for joining! Let's start building your financial future together.",
           { type: "welcome_new_user" }
-        );
-      }, 3000);
+        ).catch((error) => {
+          console.warn(
+            "Could not schedule welcome notification:",
+            error.message
+          );
+        });
+      }, 4000); // Increased timeout
 
       return { success: true, user: userCredential.user };
     } catch (error) {
-      console.error("Registration error:", error);
-      return { success: false, error: error.message };
+      // Only log the error code for debugging, not the full error
+      console.warn("Registration failed:", error.code || "Unknown error");
+      // Return the full error object to preserve error.code and error.message
+      return { success: false, error: error };
     } finally {
       setIsLoading(false);
     }
@@ -117,14 +169,13 @@ export const AuthProvider = ({ children }) => {
 
   const logout = async () => {
     try {
-      setIsLoading(true);
       await signOut(auth);
+
       return { success: true };
     } catch (error) {
-      console.error("Logout error:", error);
-      return { success: false, error: error.message };
-    } finally {
-      setIsLoading(false);
+      console.warn("Logout failed:", error.code || error.message);
+
+      return { success: false, error: error };
     }
   };
 
@@ -133,8 +184,9 @@ export const AuthProvider = ({ children }) => {
       await sendPasswordResetEmail(auth, email);
       return { success: true };
     } catch (error) {
-      console.error("Reset password error:", error);
-      return { success: false, error: error.message };
+      console.warn("Password reset failed:", error.code || error.message);
+
+      return { success: false, error: error };
     }
   };
 
