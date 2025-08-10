@@ -28,12 +28,15 @@ import {
   onSnapshot,
   deleteDoc,
   doc,
+  query,
+  where,
 } from "firebase/firestore";
 import { SIZES, FONTS } from "../constants/theme";
 
 const { width, height } = Dimensions.get("window");
 
 const TransactionsScreen = () => {
+  // ✅ ALL HOOKS MUST BE CALLED FIRST - No early returns before this
   const { colors } = useContext(ThemeContext);
   const { formatCurrency, currency } = useContext(CurrencyContext);
   const { user, isLoading } = useContext(AuthContext);
@@ -56,28 +59,47 @@ const TransactionsScreen = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
+  // ✅ Reset state when user changes
   useEffect(() => {
     if (!user?.uid) {
       setTransactions([]);
       setBills([]);
       setTotalIncome(0);
       setTotalExpenses(0);
-      return;
+      setModalVisible(false);
+      setBillModalVisible(false);
+      setSearchQuery("");
+      setActiveTab("All");
+    }
+  }, [user?.uid]);
+
+  // ✅ Data loading effect
+  useEffect(() => {
+    if (!user?.uid) {
+      return; // This is OK because it's in useEffect, not the main render
     }
 
     let unsubscribeTransactions = null;
     let unsubscribeBills = null;
 
     try {
-      // Setup transactions listener
-      unsubscribeTransactions = onSnapshot(
+      // Setup transactions listener - ONLY for current user
+      const transactionsQuery = query(
         collection(db, "transactions"),
+        where("userId", "==", user.uid)
+      );
+
+      unsubscribeTransactions = onSnapshot(
+        transactionsQuery,
         (snapshot) => {
           try {
-            const transactionList = snapshot.docs.map((doc) => ({
-              id: doc.id,
-              ...doc.data(),
-            }));
+            const transactionList = snapshot.docs
+              .map((doc) => ({
+                id: doc.id,
+                ...doc.data(),
+              }))
+              .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
             setTransactions(transactionList);
 
             let income = 0;
@@ -104,15 +126,23 @@ const TransactionsScreen = () => {
         }
       );
 
-      // Setup bills listener
-      unsubscribeBills = onSnapshot(
+      // Setup bills listener - ONLY for current user
+      const billsQuery = query(
         collection(db, "bills"),
+        where("userId", "==", user.uid)
+      );
+
+      unsubscribeBills = onSnapshot(
+        billsQuery,
         (snapshot) => {
           try {
-            const billList = snapshot.docs.map((doc) => ({
-              id: doc.id,
-              ...doc.data(),
-            }));
+            const billList = snapshot.docs
+              .map((doc) => ({
+                id: doc.id,
+                ...doc.data(),
+              }))
+              .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
             setBills(billList);
           } catch (error) {
             console.error("Error processing bills:", error);
@@ -134,48 +164,9 @@ const TransactionsScreen = () => {
         console.error("Error cleaning up listeners:", error);
       }
     };
-  }, [user]);
+  }, [user?.uid]);
 
-  if (isLoading) {
-    return (
-      <View
-        style={[
-          styles.container,
-          styles.centerContent,
-          { backgroundColor: colors.background },
-        ]}
-      >
-        <ActivityIndicator size="large" color={colors.primary} />
-        <Text
-          style={[
-            FONTS.medium,
-            { color: colors.text, marginTop: SIZES.margin },
-          ]}
-        >
-          Loading your transactions...
-        </Text>
-      </View>
-    );
-  }
-
-  if (!user) {
-    return (
-      <View
-        style={[
-          styles.container,
-          styles.centerContent,
-          { backgroundColor: colors.background },
-        ]}
-      >
-        <Text
-          style={[FONTS.large, { color: colors.text, textAlign: "center" }]}
-        >
-          Please log in to view your transactions
-        </Text>
-      </View>
-    );
-  }
-
+  // ✅ Helper functions
   const deleteTransaction = async (transactionId) => {
     try {
       await deleteDoc(doc(db, "transactions", transactionId));
@@ -218,6 +209,7 @@ const TransactionsScreen = () => {
 
       const adjustedAmount = type === "Income" ? amountValue : -amountValue;
       const newTransaction = {
+        userId: user.uid,
         category: category.trim(),
         amount: adjustedAmount,
         date: new Date().toISOString().split("T")[0],
@@ -227,6 +219,7 @@ const TransactionsScreen = () => {
           type === "Expense" && transactionType === "Side Income"
             ? "Miscellaneous"
             : transactionType,
+        createdAt: new Date(),
       };
 
       await addDoc(collection(db, "transactions"), newTransaction);
@@ -275,9 +268,11 @@ const TransactionsScreen = () => {
       amountValue = amountValue / rate;
 
       const newBill = {
+        userId: user.uid,
         name: billName.trim(),
         amount: amountValue,
         days: daysValue,
+        createdAt: new Date(),
       };
 
       await addDoc(collection(db, "bills"), newBill);
@@ -325,7 +320,7 @@ const TransactionsScreen = () => {
     setBillDays("");
   };
 
-  // Filter transactions
+  // ✅ Memoized filtered transactions
   const filteredTransactions = React.useMemo(() => {
     try {
       return transactions.filter((transaction) => {
@@ -370,6 +365,7 @@ const TransactionsScreen = () => {
     }
   }, [transactions, searchQuery, activeTab]);
 
+  // ✅ Computed values
   const userName = user?.firstName || user?.displayName || "User";
   const tabs = ["All", "Income", "Expenses", "Regular", "Side Income"];
 
@@ -421,165 +417,215 @@ const TransactionsScreen = () => {
     );
   };
 
-  return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
-      {/* Header */}
-      <View style={[styles.header, { backgroundColor: colors.primary }]}>
-        <Text style={[styles.headerTitle, { color: colors.white }]}>
-          FLOWZI WALLET
-        </Text>
-        <Text style={[styles.headerSubtitle, { color: colors.white }]}>
-          {userName}'s Transactions
-        </Text>
-      </View>
+  // ✅ CONDITIONAL RENDERING - No early returns, just conditional content
+  const renderContent = () => {
+    if (isLoading) {
+      return (
+        <View
+          style={[styles.centerContent, { backgroundColor: colors.background }]}
+        >
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text
+            style={[
+              FONTS.medium,
+              { color: colors.text, marginTop: SIZES.margin },
+            ]}
+          >
+            Loading your transactions...
+          </Text>
+        </View>
+      );
+    }
 
-      {/* Search Bar */}
-      <View
-        style={[
-          styles.searchContainer,
-          { backgroundColor: colors.cardBackground },
-        ]}
-      >
-        <MaterialIcons name="search" size={20} color={colors.primary} />
-        <TextInput
-          style={[styles.searchInput, { color: colors.text }]}
-          placeholder="Search transactions..."
-          placeholderTextColor={colors.textLight}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-        />
-        {searchQuery !== "" && (
-          <TouchableOpacity onPress={() => setSearchQuery("")}>
-            <MaterialIcons name="clear" size={20} color={colors.textLight} />
-          </TouchableOpacity>
-        )}
-      </View>
+    if (!user) {
+      return (
+        <View
+          style={[styles.centerContent, { backgroundColor: colors.background }]}
+        >
+          <Text
+            style={[FONTS.large, { color: colors.text, textAlign: "center" }]}
+          >
+            Please log in to view your transactions
+          </Text>
+        </View>
+      );
+    }
 
-      {/* Summary Cards */}
-      <View style={styles.summaryContainer}>
+    // Main app content
+    return (
+      <>
+        {/* Header */}
+        <View style={[styles.header, { backgroundColor: colors.primary }]}>
+          <Text style={[styles.headerTitle, { color: colors.white }]}>
+            FLOWZI WALLET
+          </Text>
+          <Text style={[styles.headerSubtitle, { color: colors.white }]}>
+            {userName}'s Transactions
+          </Text>
+        </View>
+
+        {/* Search Bar */}
         <View
           style={[
-            styles.summaryCard,
+            styles.searchContainer,
             { backgroundColor: colors.cardBackground },
           ]}
         >
-          <Text style={[styles.summaryLabel, { color: colors.textLight }]}>
-            Income
-          </Text>
-          <Text style={[styles.summaryAmount, { color: colors.success }]}>
-            {formatCurrency(totalIncome)}
-          </Text>
-        </View>
-        <View
-          style={[
-            styles.summaryCard,
-            { backgroundColor: colors.cardBackground },
-          ]}
-        >
-          <Text style={[styles.summaryLabel, { color: colors.textLight }]}>
-            Expenses
-          </Text>
-          <Text style={[styles.summaryAmount, { color: colors.error }]}>
-            {formatCurrency(totalExpenses)}
-          </Text>
-        </View>
-      </View>
-
-      {/* Balance */}
-      <View
-        style={[styles.balanceCard, { backgroundColor: colors.cardBackground }]}
-      >
-        <Text style={[styles.balanceLabel, { color: colors.text }]}>
-          Net Balance
-        </Text>
-        <Text
-          style={[
-            styles.balanceAmount,
-            {
-              color:
-                totalIncome - totalExpenses >= 0
-                  ? colors.success
-                  : colors.error,
-            },
-          ]}
-        >
-          {formatCurrency(totalIncome - totalExpenses)}
-        </Text>
-      </View>
-
-      {/* Tabs */}
-      <View style={styles.tabsContainer}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {tabs.map((tab) => (
-            <TouchableOpacity
-              key={tab}
-              style={[
-                styles.tab,
-                {
-                  backgroundColor:
-                    activeTab === tab ? colors.primary : colors.cardBackground,
-                  borderColor: colors.primary,
-                },
-              ]}
-              onPress={() => setActiveTab(tab)}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  { color: activeTab === tab ? colors.white : colors.text },
-                ]}
-              >
-                {tab}
-              </Text>
+          <MaterialIcons name="search" size={20} color={colors.primary} />
+          <TextInput
+            style={[styles.searchInput, { color: colors.text }]}
+            placeholder="Search transactions..."
+            placeholderTextColor={colors.textLight}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+          {searchQuery !== "" && (
+            <TouchableOpacity onPress={() => setSearchQuery("")}>
+              <MaterialIcons name="clear" size={20} color={colors.textLight} />
             </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
+          )}
+        </View>
 
-      {/* Action Buttons */}
-      <View style={styles.actionButtons}>
-        <TouchableOpacity
-          style={[styles.actionButton, { backgroundColor: colors.primary }]}
-          onPress={() => setModalVisible(true)}
-        >
-          <MaterialIcons name="add" size={20} color={colors.white} />
-          <Text style={[styles.actionButtonText, { color: colors.white }]}>
-            Add Transaction
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, { backgroundColor: colors.secondary }]}
-          onPress={() => setBillModalVisible(true)}
-        >
-          <MaterialIcons name="receipt" size={20} color={colors.white} />
-          <Text style={[styles.actionButtonText, { color: colors.white }]}>
-            Add Bill
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Transactions List */}
-      <View style={styles.listContainer}>
-        <Text style={[styles.sectionTitle, { color: colors.text }]}>
-          {activeTab} Transactions ({filteredTransactions.length})
-        </Text>
-
-        {filteredTransactions.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={[styles.emptyText, { color: colors.textLight }]}>
-              {searchQuery ? "No matching transactions" : "No transactions yet"}
+        {/* Summary Cards */}
+        <View style={styles.summaryContainer}>
+          <View
+            style={[
+              styles.summaryCard,
+              { backgroundColor: colors.cardBackground },
+            ]}
+          >
+            <Text style={[styles.summaryLabel, { color: colors.textLight }]}>
+              Income
+            </Text>
+            <Text style={[styles.summaryAmount, { color: colors.success }]}>
+              {formatCurrency(totalIncome)}
             </Text>
           </View>
-        ) : (
-          <FlatList
-            data={filteredTransactions}
-            renderItem={renderTransaction}
-            keyExtractor={(item, index) => item?.id || `transaction-${index}`}
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.listContent}
-          />
-        )}
-      </View>
+          <View
+            style={[
+              styles.summaryCard,
+              { backgroundColor: colors.cardBackground },
+            ]}
+          >
+            <Text style={[styles.summaryLabel, { color: colors.textLight }]}>
+              Expenses
+            </Text>
+            <Text style={[styles.summaryAmount, { color: colors.error }]}>
+              {formatCurrency(totalExpenses)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Balance */}
+        <View
+          style={[
+            styles.balanceCard,
+            { backgroundColor: colors.cardBackground },
+          ]}
+        >
+          <Text style={[styles.balanceLabel, { color: colors.text }]}>
+            Net Balance
+          </Text>
+          <Text
+            style={[
+              styles.balanceAmount,
+              {
+                color:
+                  totalIncome - totalExpenses >= 0
+                    ? colors.success
+                    : colors.error,
+              },
+            ]}
+          >
+            {formatCurrency(totalIncome - totalExpenses)}
+          </Text>
+        </View>
+
+        {/* Tabs */}
+        <View style={styles.tabsContainer}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {tabs.map((tab) => (
+              <TouchableOpacity
+                key={tab}
+                style={[
+                  styles.tab,
+                  {
+                    backgroundColor:
+                      activeTab === tab
+                        ? colors.primary
+                        : colors.cardBackground,
+                    borderColor: colors.primary,
+                  },
+                ]}
+                onPress={() => setActiveTab(tab)}
+              >
+                <Text
+                  style={[
+                    styles.tabText,
+                    { color: activeTab === tab ? colors.white : colors.text },
+                  ]}
+                >
+                  {tab}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+
+        {/* Action Buttons */}
+        <View style={styles.actionButtons}>
+          <TouchableOpacity
+            style={[styles.actionButton, { backgroundColor: colors.primary }]}
+            onPress={() => setModalVisible(true)}
+          >
+            <MaterialIcons name="add" size={20} color={colors.white} />
+            <Text style={[styles.actionButtonText, { color: colors.white }]}>
+              Add Transaction
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionButton, { backgroundColor: colors.secondary }]}
+            onPress={() => setBillModalVisible(true)}
+          >
+            <MaterialIcons name="receipt" size={20} color={colors.white} />
+            <Text style={[styles.actionButtonText, { color: colors.white }]}>
+              Add Bill
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Transactions List */}
+        <View style={styles.listContainer}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>
+            {activeTab} Transactions ({filteredTransactions.length})
+          </Text>
+
+          {filteredTransactions.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={[styles.emptyText, { color: colors.textLight }]}>
+                {searchQuery
+                  ? "No matching transactions"
+                  : "No transactions yet"}
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filteredTransactions}
+              renderItem={renderTransaction}
+              keyExtractor={(item, index) => item?.id || `transaction-${index}`}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.listContent}
+            />
+          )}
+        </View>
+      </>
+    );
+  };
+
+  // ✅ MAIN RETURN - No early returns here
+  return (
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      {renderContent()}
 
       {/* Transaction Modal */}
       <Modal visible={modalVisible} animationType="slide" transparent>
@@ -842,6 +888,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   centerContent: {
+    flex: 1,
     justifyContent: "center",
     alignItems: "center",
     padding: SIZES.padding,

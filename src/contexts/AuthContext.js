@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect } from "react";
+import React, { createContext, useState, useEffect, useRef } from "react";
 import { auth } from "../services/firebaseConfig";
 import {
   signInWithEmailAndPassword,
@@ -16,124 +16,180 @@ export const AuthContext = createContext();
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const isMountedRef = useRef(true);
+  const previousUserRef = useRef(null);
+  const notificationInitializedRef = useRef(false);
 
   useEffect(() => {
-    let previousUser = null; // Track if we had a user before
-    let notificationInitialized = false; // Track notification initialization
+    isMountedRef.current = true;
 
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       try {
-        if (user) {
+        if (firebaseUser) {
           try {
-            const userDoc = await getDoc(doc(db, "users", user.uid));
+            const userDoc = await getDoc(doc(db, "users", firebaseUser.uid));
             const userData = userDoc.exists() ? userDoc.data() : {};
 
-            setUser({
-              uid: user.uid,
-              email: user.email,
-              displayName: user.displayName,
+            const userObject = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              displayName: firebaseUser.displayName,
               ...userData,
-            });
+            };
+
+            // Only update state if component is still mounted
+            if (isMountedRef.current) {
+              setUser(userObject);
+            }
 
             // Initialize notifications for authenticated user (non-blocking)
-            // Only initialize once per session
-            if (!notificationInitialized) {
-              notificationInitialized = true;
-              NotificationService.initialize()
+            if (!notificationInitializedRef.current && isMountedRef.current) {
+              notificationInitializedRef.current = true;
+
+              // Non-blocking notification setup
+              Promise.resolve()
+                .then(() => NotificationService.initialize())
                 .then(() => {
-                  // Only schedule weekly summary if initialization was successful
-                  return NotificationService.scheduleWeeklySummary();
+                  if (isMountedRef.current) {
+                    return NotificationService.scheduleWeeklySummary();
+                  }
                 })
                 .catch((error) => {
-                  console.warn("Notification setup failed:", error.message);
-                  notificationInitialized = false; // Reset so we can try again
+                  if (isMountedRef.current) {
+                    console.warn(
+                      "Notification setup failed:",
+                      error?.message || error
+                    );
+                    notificationInitializedRef.current = false;
+                  }
                 });
             }
 
-            previousUser = user;
+            previousUserRef.current = firebaseUser;
           } catch (error) {
             console.warn("Could not fetch user data:", error.message);
-            setUser({
-              uid: user.uid,
-              email: user.email,
-              displayName: user.displayName,
-            });
-            previousUser = user;
+
+            // Fallback user object
+            const fallbackUser = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email,
+              displayName: firebaseUser.displayName,
+            };
+
+            if (isMountedRef.current) {
+              setUser(fallbackUser);
+            }
+
+            previousUserRef.current = firebaseUser;
           }
         } else {
-          // Only cleanup notifications if we previously had a user (actual logout)
-          if (previousUser) {
+          // User logged out
+
+          // Only cleanup notifications if we previously had a user
+          if (previousUserRef.current) {
             // Non-blocking cleanup
             Promise.resolve()
               .then(() => NotificationService.cleanup())
               .then(() => NotificationService.cancelAllNotifications())
-              .catch((error) =>
-                console.warn("Notification cleanup failed:", error.message)
-              );
-
-            notificationInitialized = false; // Reset for next login
+              .catch((error) => {
+                if (isMountedRef.current) {
+                  console.warn(
+                    "Notification cleanup failed:",
+                    error?.message || error
+                  );
+                }
+              })
+              .finally(() => {
+                notificationInitializedRef.current = false;
+              });
           }
 
-          setUser(null);
-          previousUser = null;
+          // Update state only if component is mounted
+          if (isMountedRef.current) {
+            setUser(null);
+          }
+
+          previousUserRef.current = null;
         }
       } catch (error) {
         console.warn("Auth state change error:", error.message);
-        setUser(null);
-        previousUser = null;
-        notificationInitialized = false;
-      } finally {
+
+        if (isMountedRef.current) {
+          setUser(null);
+        }
+
+        previousUserRef.current = null;
+        notificationInitializedRef.current = false;
+      }
+
+      // Always update loading state at the end (only if mounted)
+      if (isMountedRef.current) {
         setIsLoading(false);
       }
     });
 
-    return unsubscribe;
+    return () => {
+      isMountedRef.current = false;
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const login = async (email, password) => {
     try {
-      setIsLoading(true);
+      if (isMountedRef.current) {
+        setIsLoading(true);
+      }
+
       const userCredential = await signInWithEmailAndPassword(
         auth,
         email,
         password
       );
 
-      // Schedule welcome back notification only on successful login
-      // Use a longer timeout to ensure NotificationService is initialized
+      // Schedule welcome back notification with delay
       setTimeout(() => {
-        NotificationService.scheduleNotification(
-          "👋 Welcome back to FLOWZI!",
-          "Ready to continue your financial journey? Check your latest progress!",
-          { type: "welcome_back" }
-        ).catch((error) => {
-          console.warn(
-            "Could not schedule welcome notification:",
-            error.message
-          );
-        });
-      }, 3000); // Increased timeout
+        if (isMountedRef.current) {
+          NotificationService.scheduleNotification(
+            "👋 Welcome back to FLOWZI!",
+            "Ready to continue your financial journey? Check your latest progress!",
+            { type: "welcome_back" }
+          ).catch((error) => {
+            if (isMountedRef.current) {
+              console.warn(
+                "Could not schedule welcome notification:",
+                error?.message || error
+              );
+            }
+          });
+        }
+      }, 3000);
 
       return { success: true, user: userCredential.user };
     } catch (error) {
-      // Only log the error code for debugging, not the full error
       console.warn("Login failed:", error.code || "Unknown error");
-      // Return the full error object to preserve error.code and error.message
       return { success: false, error: error };
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
     }
   };
 
   const register = async (email, password, firstName, lastName) => {
     try {
-      setIsLoading(true);
+      if (isMountedRef.current) {
+        setIsLoading(true);
+      }
+
       const userCredential = await createUserWithEmailAndPassword(
         auth,
         email,
         password
       );
 
+      // Create user document in Firestore
       await setDoc(doc(db, "users", userCredential.user.uid), {
         firstName,
         lastName,
@@ -143,38 +199,41 @@ export const AuthProvider = ({ children }) => {
         notificationsEnabled: true,
       });
 
+      // Schedule welcome notification with delay
       setTimeout(() => {
-        NotificationService.scheduleNotification(
-          "🎉 Welcome to FLOWZI!",
-          "Thanks for joining! Let's start building your financial future together.",
-          { type: "welcome_new_user" }
-        ).catch((error) => {
-          console.warn(
-            "Could not schedule welcome notification:",
-            error.message
-          );
-        });
-      }, 4000); // Increased timeout
+        if (isMountedRef.current) {
+          NotificationService.scheduleNotification(
+            "🎉 Welcome to FLOWZI!",
+            "Thanks for joining! Let's start building your financial future together.",
+            { type: "welcome_new_user" }
+          ).catch((error) => {
+            if (isMountedRef.current) {
+              console.warn(
+                "Could not schedule welcome notification:",
+                error?.message || error
+              );
+            }
+          });
+        }
+      }, 4000);
 
       return { success: true, user: userCredential.user };
     } catch (error) {
-      // Only log the error code for debugging, not the full error
       console.warn("Registration failed:", error.code || "Unknown error");
-      // Return the full error object to preserve error.code and error.message
       return { success: false, error: error };
     } finally {
-      setIsLoading(false);
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
     }
   };
 
   const logout = async () => {
     try {
       await signOut(auth);
-
       return { success: true };
     } catch (error) {
       console.warn("Logout failed:", error.code || error.message);
-
       return { success: false, error: error };
     }
   };
@@ -185,7 +244,6 @@ export const AuthProvider = ({ children }) => {
       return { success: true };
     } catch (error) {
       console.warn("Password reset failed:", error.code || error.message);
-
       return { success: false, error: error };
     }
   };

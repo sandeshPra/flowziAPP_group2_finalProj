@@ -3,7 +3,6 @@ import * as Device from "expo-device";
 import { Platform, Alert } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-// Configure notification handler
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -18,46 +17,102 @@ class NotificationService {
     this.notificationListener = null;
     this.responseListener = null;
     this.isInitialized = false;
-    this.initializationPromise = null; // Track initialization promise
+    this.initializationPromise = null;
+    this.isSimulator = !Device.isDevice;
   }
 
   async initialize() {
     try {
       // Prevent multiple initializations and return existing promise if already initializing
       if (this.isInitialized) {
-        return;
+        return Promise.resolve();
       }
 
       if (this.initializationPromise) {
         return this.initializationPromise;
       }
 
-      // Create initialization promise
-      this.initializationPromise = this._performInitialization();
+      // Create initialization promise with timeout
+      this.initializationPromise = Promise.race([
+        this._performInitialization(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Initialization timeout")), 10000)
+        ),
+      ]);
+
       await this.initializationPromise;
+      return Promise.resolve();
     } catch (error) {
-      console.warn("NotificationService initialization failed:", error.message);
-      this.initializationPromise = null; // Reset so we can try again
-      // Don't throw the error - just log it and continue
+      console.warn(
+        "NotificationService initialization failed:",
+        error?.message || error
+      );
+      this.initializationPromise = null;
+      this.isInitialized = false;
+      return Promise.resolve(); // Don't throw - just continue without notifications
     }
   }
 
   async _performInitialization() {
-    await this.registerForPushNotificationsAsync();
-    this.setupNotificationListeners();
-    this.isInitialized = true;
-    console.log("NotificationService initialized successfully");
+    try {
+      if (this.isSimulator) {
+        console.log(
+          "Running in simulator - local notifications enabled, push notifications disabled"
+        );
+        // Still set up listeners and permissions for local notifications
+        await this.requestNotificationPermissions();
+        this.setupNotificationListeners();
+        this.isInitialized = true;
+        return;
+      }
+
+      await this.registerForPushNotificationsAsync();
+      this.setupNotificationListeners();
+      this.isInitialized = true;
+      console.log("NotificationService initialized successfully");
+    } catch (error) {
+      console.warn("Error in _performInitialization:", error?.message || error);
+      throw error;
+    }
+  }
+
+  async requestNotificationPermissions() {
+    try {
+      const { status: existingStatus } =
+        await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== "granted") {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== "granted") {
+        console.warn("Notification permissions not granted");
+        return false;
+      }
+
+      console.log("Notification permissions granted");
+      return true;
+    } catch (error) {
+      console.warn("Error requesting permissions:", error?.message || error);
+      return false;
+    }
   }
 
   async registerForPushNotificationsAsync() {
     try {
       let token;
 
-      // Check if running on physical device first
-      if (!Device.isDevice) {
-        console.log(
-          "Push notifications are only available on physical devices. Skipping notification setup for simulator."
-        );
+      // Always request permissions first
+      const hasPermissions = await this.requestNotificationPermissions();
+      if (!hasPermissions) {
+        return null;
+      }
+
+      // Skip push token registration for simulator (but keep local notifications)
+      if (this.isSimulator) {
+        console.log("Simulator: Skipping push notification token registration");
         return null;
       }
 
@@ -73,48 +128,60 @@ class NotificationService {
         } catch (channelError) {
           console.warn(
             "Could not create notification channel:",
-            channelError.message
+            channelError?.message || channelError
           );
         }
       }
 
+      // Skip token generation for simulator
       try {
-        const { status: existingStatus } =
-          await Notifications.getPermissionsAsync();
-        let finalStatus = existingStatus;
-
-        if (existingStatus !== "granted") {
-          const { status } = await Notifications.requestPermissionsAsync();
-          finalStatus = status;
-        }
-
-        if (finalStatus !== "granted") {
-          console.warn("Notification permissions not granted");
-          return null;
-        }
-
         const tokenData = await Notifications.getExpoPushTokenAsync({
-          projectId: "your-expo-project-id", // Add your Expo project ID here
+          projectId: "your-expo-project-id", // Replace with your actual project ID
         });
         token = tokenData.data;
         this.expoPushToken = token;
 
-        // Save token with error handling
-        try {
-          await AsyncStorage.setItem("expoPushToken", token);
-        } catch (storageError) {
-          console.warn("Could not save push token:", storageError.message);
-        }
-      } catch (permissionError) {
+        // Save token with robust error handling
+        this.safeAsyncStorageSet("expoPushToken", token);
+        console.log("Push token registered:", token);
+      } catch (tokenError) {
         console.warn(
-          "Error getting notification permissions:",
-          permissionError.message
+          "Could not get push token:",
+          tokenError?.message || tokenError
         );
+        // Continue without token - local notifications will still work
       }
 
       return token;
     } catch (error) {
-      console.warn("Error registering for push notifications:", error.message);
+      console.warn(
+        "Error registering for push notifications:",
+        error?.message || error
+      );
+      return null;
+    }
+  }
+
+  // Safe AsyncStorage wrapper to handle file system errors
+  async safeAsyncStorageSet(key, value) {
+    try {
+      await AsyncStorage.setItem(key, value);
+    } catch (error) {
+      console.warn(
+        `AsyncStorage set failed for ${key}:`,
+        error?.message || error
+      );
+    }
+  }
+
+  async safeAsyncStorageGet(key) {
+    try {
+      return await AsyncStorage.getItem(key);
+    } catch (error) {
+      console.warn(
+        `AsyncStorage get failed for ${key}:`,
+        error?.message || error
+      );
       return null;
     }
   }
@@ -124,16 +191,19 @@ class NotificationService {
       // Clean up existing listeners first
       this.cleanup();
 
+      // Set up listeners for both simulator and device
       this.notificationListener = Notifications.addNotificationReceivedListener(
         (notification) => {
           try {
             console.log(
-              "Notification received:",
-              notification.request.identifier
+              `🔔 Notification received: ${notification.request.content.title}`
             );
             this.handleNotificationReceived(notification);
           } catch (error) {
-            console.warn("Error handling notification:", error.message);
+            console.warn(
+              "Error handling notification:",
+              error?.message || error
+            );
           }
         }
       );
@@ -142,19 +212,23 @@ class NotificationService {
         Notifications.addNotificationResponseReceivedListener((response) => {
           try {
             console.log(
-              "Notification response:",
-              response.notification.request.identifier
+              `👆 Notification tapped: ${response.notification.request.content.title}`
             );
             this.handleNotificationResponse(response);
           } catch (error) {
             console.warn(
               "Error handling notification response:",
-              error.message
+              error?.message || error
             );
           }
         });
+
+      console.log("Notification listeners set up successfully");
     } catch (error) {
-      console.warn("Error setting up notification listeners:", error.message);
+      console.warn(
+        "Error setting up notification listeners:",
+        error?.message || error
+      );
     }
   }
 
@@ -176,7 +250,7 @@ class NotificationService {
           console.log("Generic notification received");
       }
     } catch (error) {
-      console.warn("Error processing notification:", error.message);
+      console.warn("Error processing notification:", error?.message || error);
     }
   }
 
@@ -196,7 +270,10 @@ class NotificationService {
           console.log("Navigate to Dashboard");
       }
     } catch (error) {
-      console.warn("Error handling notification response:", error.message);
+      console.warn(
+        "Error handling notification response:",
+        error?.message || error
+      );
     }
   }
 
@@ -204,7 +281,10 @@ class NotificationService {
     try {
       console.log("Milestone achieved!", data);
     } catch (error) {
-      console.warn("Error handling milestone notification:", error.message);
+      console.warn(
+        "Error handling milestone notification:",
+        error?.message || error
+      );
     }
   }
 
@@ -212,7 +292,7 @@ class NotificationService {
     try {
       console.log("Bill reminder:", data);
     } catch (error) {
-      console.warn("Error handling bill reminder:", error.message);
+      console.warn("Error handling bill reminder:", error?.message || error);
     }
   }
 
@@ -220,7 +300,7 @@ class NotificationService {
     try {
       console.log("Goal update:", data);
     } catch (error) {
-      console.warn("Error handling goal update:", error.message);
+      console.warn("Error handling goal update:", error?.message || error);
     }
   }
 
@@ -233,34 +313,35 @@ class NotificationService {
         return null;
       }
 
-      // Only schedule notifications on physical devices
-      if (!Device.isDevice) {
-        console.log("Skipping notification scheduling on simulator");
-        return null;
-      }
+      // 🎉 ENABLE ACTUAL NOTIFICATIONS IN SIMULATOR
+      const notificationContent = {
+        title,
+        body,
+        data,
+        sound: true, // Enable sound
+      };
 
       const id = await Notifications.scheduleNotificationAsync({
-        content: {
-          title,
-          body,
-          data,
-          sound: "default",
-        },
+        content: notificationContent,
         trigger: trigger || { seconds: 1 },
       });
 
-      console.log("Notification scheduled with ID:", id);
+      if (this.isSimulator) {
+        console.log(`🔔 [SIMULATOR] Scheduled notification: ${title}`);
+      } else {
+        console.log("Notification scheduled with ID:", id);
+      }
+
       return id;
     } catch (error) {
-      console.warn("Failed to schedule notification:", error.message);
+      console.warn("Failed to schedule notification:", error?.message || error);
       return null;
     }
   }
 
   async scheduleBillReminder(billName, amount, daysUntilDue, formatCurrency) {
     try {
-      if (daysUntilDue <= 0 || !this.isInitialized || !Device.isDevice)
-        return [];
+      if (daysUntilDue <= 0 || !this.isInitialized) return [];
 
       const triggers = [];
 
@@ -315,20 +396,14 @@ class NotificationService {
 
       return notificationIds;
     } catch (error) {
-      console.warn("Error scheduling bill reminders:", error.message);
+      console.warn("Error scheduling bill reminders:", error?.message || error);
       return [];
     }
   }
 
   async checkGoalMilestones(goals, transactions, formatCurrency) {
     try {
-      if (
-        !goals ||
-        goals.length === 0 ||
-        !this.isInitialized ||
-        !Device.isDevice
-      )
-        return;
+      if (!goals || goals.length === 0 || !this.isInitialized) return;
 
       for (const goal of goals) {
         try {
@@ -338,7 +413,9 @@ class NotificationService {
           for (const milestone of milestones) {
             try {
               const storageKey = `milestone_${goal.id}_${milestone}`;
-              const alreadyNotified = await AsyncStorage.getItem(storageKey);
+              const alreadyNotified = await this.safeAsyncStorageGet(
+                storageKey
+              );
 
               if (progress >= milestone && !alreadyNotified) {
                 await this.sendMilestoneNotification(
@@ -347,21 +424,24 @@ class NotificationService {
                   progress,
                   formatCurrency
                 );
-                await AsyncStorage.setItem(storageKey, "true");
+                await this.safeAsyncStorageSet(storageKey, "true");
               }
             } catch (storageError) {
               console.warn(
                 "Error checking milestone storage:",
-                storageError.message
+                storageError?.message || storageError
               );
             }
           }
         } catch (goalError) {
-          console.warn("Error processing goal:", goalError.message);
+          console.warn(
+            "Error processing goal:",
+            goalError?.message || goalError
+          );
         }
       }
     } catch (error) {
-      console.warn("Error checking goal milestones:", error.message);
+      console.warn("Error checking goal milestones:", error?.message || error);
     }
   }
 
@@ -376,7 +456,7 @@ class NotificationService {
       );
       return (savedAmount / goal.targetAmount) * 100;
     } catch (error) {
-      console.warn("Error calculating goal progress:", error.message);
+      console.warn("Error calculating goal progress:", error?.message || error);
       return 0;
     }
   }
@@ -440,7 +520,10 @@ class NotificationService {
 
       this.showMilestoneCelebration(goal, milestone);
     } catch (error) {
-      console.warn("Error sending milestone notification:", error.message);
+      console.warn(
+        "Error sending milestone notification:",
+        error?.message || error
+      );
     }
   }
 
@@ -467,13 +550,16 @@ class NotificationService {
         ]
       );
     } catch (error) {
-      console.warn("Error showing milestone celebration:", error.message);
+      console.warn(
+        "Error showing milestone celebration:",
+        error?.message || error
+      );
     }
   }
 
   async sendSmartInsights(transactions, goals, monthlyIncome, formatCurrency) {
     try {
-      if (!this.isInitialized || !Device.isDevice) return;
+      if (!this.isInitialized) return;
 
       const insights = this.generateSmartInsights(
         transactions,
@@ -494,7 +580,7 @@ class NotificationService {
         );
       }
     } catch (error) {
-      console.warn("Error sending smart insights:", error.message);
+      console.warn("Error sending smart insights:", error?.message || error);
     }
   }
 
@@ -502,7 +588,6 @@ class NotificationService {
     try {
       const insights = [];
 
-      // Analyze spending patterns
       const thisMonth = new Date().getMonth();
       const thisMonthTransactions = transactions.filter(
         (t) => new Date(t.date).getMonth() === thisMonth && t.amount < 0
@@ -531,14 +616,14 @@ class NotificationService {
 
       return insights;
     } catch (error) {
-      console.warn("Error generating smart insights:", error.message);
+      console.warn("Error generating smart insights:", error?.message || error);
       return [];
     }
   }
 
   async scheduleWeeklySummary() {
     try {
-      if (!this.isInitialized || !Device.isDevice) return;
+      if (!this.isInitialized) return;
 
       await this.scheduleNotification(
         "📊 Weekly Financial Summary",
@@ -549,27 +634,45 @@ class NotificationService {
         },
         { weekday: 1, hour: 18, minute: 0, repeats: true }
       );
+
+      if (this.isSimulator) {
+        console.log("📊 [SIMULATOR] Weekly summary scheduled");
+      }
     } catch (error) {
-      console.warn("Error scheduling weekly summary:", error.message);
+      console.warn("Error scheduling weekly summary:", error?.message || error);
     }
   }
 
   async cancelNotification(notificationId) {
     try {
       if (!notificationId) return;
+
       await Notifications.cancelScheduledNotificationAsync(notificationId);
-      console.log("Notification cancelled:", notificationId);
+
+      if (this.isSimulator) {
+        console.log(`🚫 [SIMULATOR] Cancelled notification: ${notificationId}`);
+      } else {
+        console.log("Notification cancelled:", notificationId);
+      }
     } catch (error) {
-      console.warn("Failed to cancel notification:", error.message);
+      console.warn("Failed to cancel notification:", error?.message || error);
     }
   }
 
   async cancelAllNotifications() {
     try {
       await Notifications.cancelAllScheduledNotificationsAsync();
-      console.log("All notifications cancelled");
+
+      if (this.isSimulator) {
+        console.log("🚫 [SIMULATOR] All notifications cancelled");
+      } else {
+        console.log("All notifications cancelled");
+      }
     } catch (error) {
-      console.warn("Failed to cancel all notifications:", error.message);
+      console.warn(
+        "Failed to cancel all notifications:",
+        error?.message || error
+      );
     }
   }
 
@@ -577,10 +680,21 @@ class NotificationService {
     try {
       const notifications =
         await Notifications.getAllScheduledNotificationsAsync();
-      console.log("Pending notifications:", notifications.length);
+
+      if (this.isSimulator) {
+        console.log(
+          `📋 [SIMULATOR] Pending notifications: ${notifications.length}`
+        );
+      } else {
+        console.log("Pending notifications:", notifications.length);
+      }
+
       return notifications;
     } catch (error) {
-      console.warn("Failed to get pending notifications:", error.message);
+      console.warn(
+        "Failed to get pending notifications:",
+        error?.message || error
+      );
       return [];
     }
   }
@@ -599,7 +713,53 @@ class NotificationService {
       this.initializationPromise = null;
       console.log("NotificationService cleaned up");
     } catch (error) {
-      console.warn("Error during notification cleanup:", error.message);
+      console.warn(
+        "Error during notification cleanup:",
+        error?.message || error
+      );
+    }
+  }
+
+  // 🧪 TESTING METHODS - Add these for easy testing
+  async testNotification() {
+    try {
+      await this.scheduleNotification(
+        "🧪 Test Notification",
+        "This is a test notification to verify everything works!",
+        { type: "test" },
+        { seconds: 2 }
+      );
+      console.log("Test notification scheduled");
+    } catch (error) {
+      console.warn("Test notification failed:", error?.message || error);
+    }
+  }
+
+  async testBillReminder() {
+    try {
+      await this.scheduleNotification(
+        "💰 Test Bill Reminder",
+        "Your Netflix subscription of $15.99 is due in 3 days",
+        { type: "bill_reminder", billName: "Netflix" },
+        { seconds: 3 }
+      );
+      console.log("Test bill reminder scheduled");
+    } catch (error) {
+      console.warn("Test bill reminder failed:", error?.message || error);
+    }
+  }
+
+  async testMilestone() {
+    try {
+      await this.scheduleNotification(
+        "🎉 Goal Milestone!",
+        "Amazing! You've reached 50% of your Vacation Fund goal!",
+        { type: "milestone", milestone: 50 },
+        { seconds: 5 }
+      );
+      console.log("Test milestone notification scheduled");
+    } catch (error) {
+      console.warn("Test milestone failed:", error?.message || error);
     }
   }
 }
